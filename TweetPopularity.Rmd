@@ -1,0 +1,276 @@
+t---
+title: 'Tweet popularity prediction'
+author: 'Enrico Stefanel^[University of Trieste, enrico.stefanel@studenti.units.it]'
+date: "2023-02-01"
+editor_options:
+  chunk_output_type: inline
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, message=TRUE, warning=TRUE,
+                      eval=TRUE, cache=TRUE,
+                      fig.align='center')
+```
+
+
+# Introduction
+
+We are asked to implement a ML system for predicting *how popular* will a tweet
+about food be, with completely freedom on the system design and data retrieval.
+
+We can not proceed with the system design without knowing in advice how the data
+will be. It follows that the first step we are going to do is to try to obtain
+some Twitter data.
+
+
+# Data
+
+We are not going into details on how we the data has been obtained. The only
+thing that we need to know, is that now the dataset is stored into the
+`./tweets.csv` file.
+
+## Esplorative analysis
+
+Let's take a look at our data. We have a list of 50000 tweets with relative
+features. The first think to keep in mind, is that we are asked to predict
+*how popular* will a tweet about food be. It follows that we firstly need to
+identify the **explanatory variables** and the **response variables**.
+
+```{r read_data, echo=TRUE}
+colnames(tweets) # Print the columns name
+
+# Remove useless columns
+tweets <- tweets %>% 
+  select(-c("tweet.id", "tweet.lang", "user.username", "user.fullname", "user.description", "user.location", "media.url"))
+
+library(textclean)
+tweets$tweet.text <- replace_emoji(tweets$tweet.text)
+
+head(tweets)
+```
+
+It is natural to think that the *populaity* of a tweet can be measured as a
+function of the number of likes, retweets, replies and quotes of the specific
+tweet.
+To complicate matters, we can also think that the *populaity* of a tweet can
+also be affected by the popularity of the account that posted the same.
+This *account populairty* can be measured as a function of the number of
+followers, following and maybe the tweet count.
+We are then led to think that the *overral tweet popularity* is high when
+the *tweet popularity* is high and the *account popularity* is low. In case
+the *account popularity* is high, we already expect the tweet to be "popular",
+so we decide to penalize it if it does not reach the expected popularity.
+
+```{r}
+tweets$popularity <- log1p((tweets$tweet.public_metrics.like_count+tweets$tweet.public_metrics.retweet_count+tweets$tweet.public_metrics.reply_count)) - log1p(tweets$user.public_metrics.followers_count)
+
+hist(tweets$popularity,
+     breaks=10,
+     main="Tweet popularity in the dataset")
+```
+
+Looking at the dataset, we might also note that it contains many features
+that may be considered unnecessary for our purpose. For example, the
+`tweet.id` is some arbitrary unique code.
+
+```{r}
+# Remove useless columns
+tweets <- tweets %>% 
+  select(-c("tweet.datetime", "tweet.public_metrics.retweet_count", "tweet.public_metrics.reply_count", "tweet.public_metrics.like_count", "tweet.public_metrics.quote_count", "media.public_metrics.view_count", "user.public_metrics.followers_count", "user.public_metrics.following_count", "user.public_metrics.tweet_count", "user.public_metrics.listed_count"))
+```
+
+
+
+```{r preprocessing}
+
+library(dplyr)
+library(textclean)
+library(tm)
+
+# Read data from the CSV file
+tweets <- read.csv('./data/tweets.csv')
+n      <- nrow(tweets)
+
+tweets <- tweets %>% 
+  dplyr::select(-c("tweet.id", "tweet.lang", "user.username", "user.fullname", "user.description", "user.location", "media.url"))
+tweets$tweet.text <- replace_emoji(tweets$tweet.text)
+
+tweets$popularity <- log1p((tweets$tweet.public_metrics.like_count+tweets$tweet.public_metrics.retweet_count+tweets$tweet.public_metrics.reply_count)) - log1p(tweets$user.public_metrics.followers_count)
+
+# Remove useless columns
+tweets <- tweets %>% 
+  dplyr::select(-c("tweet.datetime", "tweet.public_metrics.retweet_count", "tweet.public_metrics.reply_count", "tweet.public_metrics.like_count", "tweet.public_metrics.quote_count", "media.public_metrics.view_count", "user.public_metrics.followers_count", "user.public_metrics.following_count", "user.public_metrics.tweet_count", "user.public_metrics.listed_count", "media.width", "media.height", "media.duration_ms"))
+
+
+# Convert text variable to a corpus
+corpus <- Corpus(VectorSource(tweets$tweet.text))
+
+# Perform text pre-processing
+corpus <- tm_map(corpus, PlainTextDocument)
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, stripWhitespace)
+corpus <- tm_map(corpus, removeWords, c("food", stopwords("english")))
+corpus <- tm_map(corpus, stemDocument)
+
+# Create a document-term matrix
+dtm <- DocumentTermMatrix(corpus,control = list(weighting = function(x) weightTfIdf(x, normalize = FALSE)))
+sparse <- removeSparseTerms(dtm, 0.99)
+
+# Convert dtm to a data frame
+frequencies <- as.data.frame(as.matrix(sparse))
+
+# Bind the dtm data frame with the rest of the numerical variables
+tweets <- cbind(frequencies, dplyr::select(tweets, -c("tweet.text")))
+tweets <- tweets %>% subset(., select=which(!duplicated(names(.)))) 
+
+tweets$media.type <- as.factor(tweets$media.type)
+
+tweets <- tweets %>% replace(is.na(.), 0)
+
+set.seed(42) # Set Seed so that same sample can be reproduced in future
+
+sample <- sample.int(n, .8*n, replace=FALSE)
+tweets.train <- tweets[sample, ]
+tweets.test  <- tweets[-sample, ]
+
+rm(n, sample)
+
+
+X.train <- tweets.train %>% dplyr::select(-c("popularity"))
+Y.train <- tweets.train$popularity
+
+X.test <- tweets.test %>% dplyr::select(-c("popularity"))
+Y.test <- tweets.test$popularity
+
+hist(tweets.train$popularity, freq=FALSE, col=rgb(1,0,0,0.5),
+     xlab='Popularity', ylab='Density', main='')
+hist(tweets.test$popularity, freq=FALSE, col=rgb(0,0,1,0.5), add=TRUE)
+
+legend('topright', c('Training set', 'Test set'),
+       fill=c(rgb(1,0,0,0.5), rgb(0,0,1,0.5)))
+
+```
+
+## Dummy regressor
+```{r}
+dummy_regressor <- lm(Y.train ~ 1, data=X.train)
+mean((Y.test - predict(dummy_regressor, newdata=X.test))^2)
+
+R <- 1000
+time.taken <- 0
+for (i in 1:R) {
+time.start <- Sys.time()
+. <- predict(dummy_regressor, newdata=X.test)
+time.end <- Sys.time()
+
+time.taken <- time.taken + (time.end - time.start)
+}
+
+time.taken/R
+```
+
+## Linear model
+```{r}
+complete_linear_model <- lm(Y.train~.,data=X.train)
+mean((Y.test - predict(complete_linear_model, newdata=X.test))^2)
+
+time.taken <- 0
+for (i in 1:R) {
+time.start <- Sys.time()
+. <- predict(complete_linear_model, newdata=X.test)
+time.end <- Sys.time()
+
+time.taken <- time.taken + (time.end - time.start)
+}
+
+time.taken/R
+
+length(complete_linear_model$coefficients)
+```
+
+```{r}
+complete_linear_model.evolved <- step(dummy_regressor, scope=list(lower=dummy_regressor, upper=complete_linear_model), direction = "both") #Best fitting 
+
+mean((Y.test - predict(complete_linear_model.evolved, newdata=X.test))^2)
+
+time.taken <- 0
+for (i in 1:R) {
+time.start <- Sys.time()
+. <- predict(complete_linear_model.evolved, newdata=X.test)
+time.end <- Sys.time()
+
+time.taken <- time.taken + (time.end - time.start)
+}
+
+time.taken/R
+
+length(complete_linear_model.evolved$coefficients)
+```
+
+## Regression tree
+```{r}
+library(rpart)
+library(rpart.plot)
+incomplete_tree <- rpart(Y.train~., data=X.train, method="anova", model=TRUE, control=c(cp=0.01))
+#complete_tree <- rpart(Y.train~., data=X.train, method="anova", model=TRUE, control=c(cp=0.0001))
+# Plot the binary tree
+rpart.plot(incomplete_tree, snip=TRUE)
+
+mean((Y.test - predict(incomplete_tree, newdata=X.test))^2)
+
+time.taken <- 0
+for (i in 1:R) {
+time.start <- Sys.time()
+. <- predict(incomplete_tree, newdata=X.test)
+time.end <- Sys.time()
+
+time.taken <- time.taken + (time.end - time.start)
+}
+
+time.taken/R
+
+
+```
+
+## Random forest
+
+
+```{r}
+# Fit the decision tree model
+library(randomForest)
+random_forest.100.100 <- randomForest(Y.train~., data=X.train, ntree=100, nodesize=100, importance=TRUE)
+#random_forest.250 <- randomForest(Y.train~., data=X.train, ntree=250, importance=TRUE)
+#random_forest.500 <- randomForest(Y.train~., data=X.train, ntree=500, importance=TRUE)
+
+mean((Y.test - predict(random_forest.100.100, newdata=X.test))^2)
+
+time.taken <- 0
+for (i in 1:R) {
+time.start <- Sys.time()
+. <- predict(random_forest.100.100, newdata=X.test)
+time.end <- Sys.time()
+
+time.taken <- time.taken + (time.end - time.start)
+}
+
+time.taken/R
+
+
+
+importance(random_forest.100.100, type=1, scale=TRUE)
+
+varImpPlot(random_forest.100.100, type=1, n.var=15)
+
+
+
+
+#library(wordcloud)
+#wordcloud(words = df$word, freq = df$freq, min.freq = 1,
+#          max.words=200, random.order=FALSE, rot.per=0.35,
+#          colors=brewer.pal(8, "Dark2"))
+```
